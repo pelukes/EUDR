@@ -29,10 +29,10 @@ def get_forest_cover_and_hansen_image_url(geometry):
     hansen_forest_change = ee.Image('UMD/hansen/global_forest_change_2023_v1_11')
     
     # Select forest loss from 2020 onwards using the 'lossyear' band
-    forest_loss_2020_onwards = hansen_forest_change.select('lossyear').gt(20)
+    forest_loss_2020_onwards = hansen_forest_change.select('lossyear').updateMask(hansen_forest_change.select('lossyear').gt(20))
     
     # Buffer the geometry
-    buffered_geometry = geometry.buffer(500).bounds()  # 500 meters buffer
+    buffered_geometry = geometry.buffer(1000).bounds()  # 500 meters buffer
     
     # Visualize JRC Global Forest Cover 2020
     jrc_visualized = jrc_forest_cover.visualize(
@@ -47,7 +47,7 @@ def get_forest_cover_and_hansen_image_url(geometry):
         bands=['lossyear'],  # Visualize loss year band
         min=21,
         max=23,
-        palette=['FFFFFF', 'FF0000']  # Red for forest loss
+        palette=['0000FF','00FF00', 'FF0000']  # Red for forest loss
     )
     
     # Combine JRC forest cover with Hansen forest loss
@@ -57,7 +57,7 @@ def get_forest_cover_and_hansen_image_url(geometry):
     # Define thumbnail parameters for the combined image
     thumbnail_params = {
         'region': buffered_geometry.getInfo(),
-        'dimensions': 1024,  # Image size
+        'dimensions': [512,512],  # Image size
         'format': 'png'
     }
     
@@ -73,7 +73,7 @@ def calculate_ndvi(geometry, start_date, end_date):
     s2_collection = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \
                     .filterBounds(geometry) \
                     .filterDate(start_date, end_date) \
-                    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20)) \
+                    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10)) \
                     .map(lambda image: image.normalizedDifference(['B8A', 'B4'])
                          .rename('NDVI')
                          .set('system:time_start', image.get('system:time_start')))  # Keep time metadata
@@ -101,13 +101,12 @@ def convert_timestamp_to_date(timestamp):
     return datetime.utcfromtimestamp(timestamp / 1000)  # Convert from milliseconds to seconds
 
 # Function to create NDVI time series chart and include RGB images + JRC Forest Cover map
+# Function to create NDVI time series chart and include RGB images + JRC Forest Cover map
 def create_ndvi_chart_with_rgb_and_forest(point_geom, plot_id, pdf_writer):
     geometry = ee.Geometry.Point(point_geom.x, point_geom.y)
     
     # Get NDVI time series for 2019-2024
-    ndvi_data = calculate_ndvi(geometry, '2019-01-01', '2024-12-31').getInfo()
-    
-    
+    ndvi_data = calculate_ndvi(geometry, '2017-01-01', '2024-12-31').getInfo()
     
     # Handle cases where NDVI data or time_start is missing
     times = []
@@ -123,7 +122,6 @@ def create_ndvi_chart_with_rgb_and_forest(point_geom, plot_id, pdf_writer):
             times.append(readable_time)
             ndvi_values.append(ndvi)
    
-         
     # Get Sentinel-2 RGB image URLs for 2020 and 2024
     reference_rgb_url = get_rgb_image(geometry, '2020-06-01', '2020-08-31')
     current_rgb_url = get_rgb_image(geometry, '2024-06-01', '2024-08-31')
@@ -136,10 +134,13 @@ def create_ndvi_chart_with_rgb_and_forest(point_geom, plot_id, pdf_writer):
     current_rgb = Image.open(BytesIO(requests.get(current_rgb_url).content))
     jrc_hansen = Image.open(BytesIO(requests.get(jrc_hansen_url).content))
     
-    # Plot NDVI time series and RGB images
-    fig, axs = plt.subplots(1, 4, figsize=(20, 5))  # Increased the number of subplots to 4
+    # Set figure size to A4 landscape (11.69 x 8.27 inches)
+    fig, axs = plt.subplots(1, 4, figsize=(20, 5))
     
-    # NDVI Time Series Plot
+    # Ensure all subplots have the same size and square aspect ratio
+    #plt.subplots_adjust(left=0.05, right=0.95, top=0.85, bottom=0.15, wspace=0.4)
+    
+    # NDVI Time Series Plot (set equal aspect ratio)
     if len(times) > 0:
         axs[0].plot(times, ndvi_values, marker='o', linestyle='-')
         axs[0].set_title(f'NDVI Time Series for Plot {plot_id}')
@@ -148,20 +149,24 @@ def create_ndvi_chart_with_rgb_and_forest(point_geom, plot_id, pdf_writer):
     else:
         axs[0].text(0.5, 0.5, 'No NDVI data available', horizontalalignment='center', verticalalignment='center', transform=axs[0].transAxes)
     
-    # Reference RGB Image (2020)
+    
+    # Reference RGB Image (2020) with equal aspect ratio
     axs[1].imshow(reference_rgb)
-    axs[1].set_title('Reference (2020)')
+    axs[1].set_title('S2 Reference (2020)')
     axs[1].axis('off')
+    axs[1].set_aspect('equal', 'box')  # Ensure square shape
     
-    # Current RGB Image (2024)
+    # Current RGB Image (2024) with equal aspect ratio
     axs[2].imshow(current_rgb)
-    axs[2].set_title('Current (2024)')
+    axs[2].set_title('S2 Current (2024)')
     axs[2].axis('off')
+    axs[2].set_aspect('equal', 'box')  # Ensure square shape
     
-    # JRC Global Forest Cover + Hansen Logging (2020 onwards)
+    # JRC Global Forest Cover + Hansen Logging (2020 onwards) with equal aspect ratio
     axs[3].imshow(jrc_hansen)
-    axs[3].set_title('Forest Cover + Logging (2020 onwards)')
+    axs[3].set_title('JRC Forest Cover 2020 + Hansen Logging (2021-2023)')
     axs[3].axis('off')
+    axs[3].set_aspect('equal', 'box')  # Ensure square shape
     
     # Save the figure to the PDF
     pdf_writer.savefig(fig)
@@ -194,15 +199,15 @@ def get_rgb_image(geometry, start_date, end_date):
     
     # Visualize the image with local stretching
     rgb_image = s2_collection.visualize(
-        bands=['B4', 'B3', 'B2'],
+        bands=['B11', 'B8A', 'B4'],
         #min=[min_b4, min_b3, min_b2],
         #max=[max_b4, max_b3, max_b2]
         min=[0,0,0],
-        max=[1000,1000,1000]
+        max=[4000,4000,1000]
     )
     
     # Create a buffered region around the point
-    buffered_geometry = geometry.buffer(500).bounds()  # 1000 meters buffer
+    buffered_geometry = geometry.buffer(1000).bounds()  # 1000 meters buffer
     
     # Define thumbnail parameters
     thumbnail_params = {
@@ -218,6 +223,7 @@ def get_rgb_image(geometry, start_date, end_date):
 
 # Main function to process all points and save charts with RGB images as PDF
 def process_shapefile_to_ndvi_time_series(shapefile_gdf):
+    # Use PdfPages to save the PDF in A4 landscape format
     with PdfPages('ndvi_time_series_with_rgb_and_forest_cover.pdf') as pdf_writer:
         for idx, row in shapefile_gdf.iterrows():
             point_geom = row.geometry
@@ -248,4 +254,3 @@ label.pack(pady=10)
 
 # Start the GUI
 root.mainloop()
-
