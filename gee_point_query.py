@@ -10,7 +10,9 @@ import os
 from datetime import datetime  # For handling timestamps
 
 # Initialize Google Earth Engine API
-ee.Initialize()
+#ee.Initialize(opt_project='ee-eudr-uhul')
+ee.Authenticate()
+ee.Initialize(project='ee-my-vrobel')
 
 # Function to select a shapefile through a GUI dialog
 def select_shapefile():
@@ -80,12 +82,16 @@ def calculate_ndvi(geometry, start_date, end_date):
     
     # Extract NDVI values at the given point
     def extract_ndvi(image):
+        # ndvi_value = image.reduceRegion(
+        #     reducer=ee.Reducer.mean(),
+        #     geometry=geometry,
+        #     scale=500
+        # ).get('NDVI')
         ndvi_value = image.reduceRegion(
             reducer=ee.Reducer.mean(),
             geometry=geometry,
             scale=500
         ).get('NDVI')
-        
         return ee.Feature(None, {
             'NDVI': ndvi_value,
             'system:time_start': image.get('system:time_start')
@@ -102,44 +108,45 @@ def convert_timestamp_to_date(timestamp):
 
 # Function to create NDVI time series chart and include RGB images + JRC Forest Cover map
 # Function to create NDVI time series chart and include RGB images + JRC Forest Cover map
-def create_ndvi_chart_with_rgb_and_forest(point_geom, plot_id, pdf_writer):
-    geometry = ee.Geometry.Point(point_geom.x, point_geom.y)
-    
+def create_ndvi_chart_with_rgb_and_forest(polygon_geom, plot_id, pdf_writer):
+    # Extract geometry as a polygon
+    if polygon_geom.geom_type == 'Polygon':
+        geometry = ee.Geometry.Polygon([list(polygon_geom.exterior.coords)])  # Ensure proper nesting of coordinates
+    else:
+        raise ValueError(f"Geometry type {polygon_geom.geom_type} is not supported. Only 'Polygon' is allowed.")
+
     # Get NDVI time series for 2019-2024
     ndvi_data = calculate_ndvi(geometry, '2017-01-01', '2024-12-31').getInfo()
-    
+
     # Handle cases where NDVI data or time_start is missing
     times = []
     ndvi_values = []
-    
+
     for feature in ndvi_data['features']:
         time = feature['properties'].get('system:time_start', None)
         ndvi = feature['properties'].get('NDVI', None)
-        
+
         if time is not None and ndvi is not None:
             # Convert the time from Unix to human-readable format
             readable_time = convert_timestamp_to_date(time)
             times.append(readable_time)
             ndvi_values.append(ndvi)
-   
+
     # Get Sentinel-2 RGB image URLs for 2020 and 2024
     reference_rgb_url = get_rgb_image(geometry, '2020-06-01', '2020-08-31')
     current_rgb_url = get_rgb_image(geometry, '2024-06-01', '2024-08-31')
-    
+
     # Get JRC and Hansen combined forest cover and logging data for 2020 onwards
     jrc_hansen_url = get_forest_cover_and_hansen_image_url(geometry)
-    
+
     # Fetch images using requests
     reference_rgb = Image.open(BytesIO(requests.get(reference_rgb_url).content))
     current_rgb = Image.open(BytesIO(requests.get(current_rgb_url).content))
     jrc_hansen = Image.open(BytesIO(requests.get(jrc_hansen_url).content))
-    
+
     # Set figure size to A4 landscape (11.69 x 8.27 inches)
     fig, axs = plt.subplots(1, 4, figsize=(20, 5))
-    
-    # Ensure all subplots have the same size and square aspect ratio
-    #plt.subplots_adjust(left=0.05, right=0.95, top=0.85, bottom=0.15, wspace=0.4)
-    
+
     # NDVI Time Series Plot (set equal aspect ratio)
     if len(times) > 0:
         axs[0].plot(times, ndvi_values, marker='o', linestyle='-')
@@ -148,29 +155,56 @@ def create_ndvi_chart_with_rgb_and_forest(point_geom, plot_id, pdf_writer):
         axs[0].set_ylabel('NDVI')
     else:
         axs[0].text(0.5, 0.5, 'No NDVI data available', horizontalalignment='center', verticalalignment='center', transform=axs[0].transAxes)
-    
-    
+
     # Reference RGB Image (2020) with equal aspect ratio
     axs[1].imshow(reference_rgb)
     axs[1].set_title('S2 Reference (2020)')
     axs[1].axis('off')
     axs[1].set_aspect('equal', 'box')  # Ensure square shape
-    
+
     # Current RGB Image (2024) with equal aspect ratio
     axs[2].imshow(current_rgb)
     axs[2].set_title('S2 Current (2024)')
     axs[2].axis('off')
     axs[2].set_aspect('equal', 'box')  # Ensure square shape
-    
+
     # JRC Global Forest Cover + Hansen Logging (2020 onwards) with equal aspect ratio
     axs[3].imshow(jrc_hansen)
     axs[3].set_title('JRC Forest Cover 2020 + Hansen Logging (2021-2023)')
     axs[3].axis('off')
     axs[3].set_aspect('equal', 'box')  # Ensure square shape
-    
+
     # Save the figure to the PDF
     pdf_writer.savefig(fig)
     plt.close()
+
+
+def calculate_ndvi(geometry, start_date, end_date):
+    s2_collection = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED') \
+                    .filterBounds(geometry) \
+                    .filterDate(start_date, end_date) \
+                    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10)) \
+                    .limit(5000) \
+                    .map(lambda image: image.normalizedDifference(['B8A', 'B4'])
+                         .rename('NDVI')
+                         .set('system:time_start', image.get('system:time_start')))
+    
+    def extract_ndvi(image):
+        ndvi_value = image.reduceRegion(
+            reducer=ee.Reducer.mean(),
+            geometry=geometry,
+            scale=500,
+            maxPixels=1e7,
+            bestEffort=True
+        ).get('NDVI')
+
+        return ee.Feature(None, {
+            'NDVI': ndvi_value,
+            'system:time_start': image.get('system:time_start')
+        })
+
+    ndvi_features = s2_collection.map(extract_ndvi)
+    return ndvi_features
 
 # Function to get RGB image with lowest cloud cover and stretch histogram locally
 def get_rgb_image(geometry, start_date, end_date):
@@ -207,11 +241,11 @@ def get_rgb_image(geometry, start_date, end_date):
     )
     
     # Create a buffered region around the point
-    buffered_geometry = geometry.buffer(1000).bounds()  # 1000 meters buffer
+    # buffered_geometry = geometry.buffer(1000).bounds()  # 1000 meters buffer
     
     # Define thumbnail parameters
     thumbnail_params = {
-        'region': buffered_geometry.getInfo(),
+        'region': geometry.getInfo(),
         'dimensions': 512,
         'format': 'png'
     }
@@ -245,7 +279,9 @@ root = Tk()
 root.title("NDVI and RGB Image Time Series Generator")
 
 # Button to trigger shapefile selection
-button = Button(root, text="Select Shapefile with Points", command=on_button_click)
+# button = Button(root, text="Select Shapefile with Points", command=on_button_click)
+button = Button(root, text="Select Shapefile with Polygons", command=on_button_click)
+
 button.pack(pady=20)
 
 # Label to show the status of processing
